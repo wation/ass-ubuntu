@@ -1,0 +1,414 @@
+# pingxiaozhu.com — 官网（裸域 + www）与 ass 子域（*.pingxiaozhu.com，含 vip）
+# 启用: sudo ln -sf /etc/nginx/sites-available/pingxiaozhu /etc/nginx/sites-enabled/
+#
+# ERR_TOO_MANY_REDIRECTS：常见于 Cloudflare「Flexible」— 访客 HTTPS、回源 HTTP，:80 若仍一律 301 到 https 会死循环。
+# 当请求已带 X-Forwarded-Proto: https 时在 80 上直接响应。长期建议 Cloudflare 改为 Full / Full (strict)。
+
+# —— 官网 :80 ——
+server {
+    listen 80;
+    listen [::]:80;
+    server_name pingxiaozhu.com www.pingxiaozhu.com;
+
+    root /opt/pingxiaozhu/dist;
+    index index.html;
+
+    access_log /var/log/nginx/pingxiaozhu_www_access.log;
+    error_log /var/log/nginx/pingxiaozhu_www_error.log;
+
+    set $pxz_www_redirect 1;
+    if ($http_x_forwarded_proto = "https") {
+        set $pxz_www_redirect 0;
+    }
+    if ($uri ~ "^/.well-known/acme-challenge/") {
+        set $pxz_www_redirect 0;
+    }
+    if ($pxz_www_redirect = 1) {
+        return 301 https://$host$request_uri;
+    }
+
+    location /.well-known/acme-challenge/ {
+        allow all;
+        default_type text/plain;
+        try_files $uri =404;
+    }
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:8787;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+    }
+
+    location / {
+        try_files $uri $uri/index.html =404;
+    }
+}
+
+# —— 官网 :443 ——
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name pingxiaozhu.com www.pingxiaozhu.com;
+
+    # 若证书目录为 pingxiaozhu.com-0001，请改下面两行
+    ssl_certificate /etc/letsencrypt/live/pingxiaozhu.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/pingxiaozhu.com/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+    root /opt/pingxiaozhu/dist;
+    index index.html;
+
+    access_log /var/log/nginx/pingxiaozhu_www_access.log;
+    error_log /var/log/nginx/pingxiaozhu_www_error.log;
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:8787;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location / {
+        try_files $uri $uri/index.html =404;
+    }
+}
+
+# —— ass：vip :80 ——
+server {
+    listen 80;
+    listen [::]:80;
+    server_name vip.pingxiaozhu.com;
+
+    access_log /var/log/nginx/vip_access.log;
+    error_log /var/log/nginx/vip_error.log;
+    client_max_body_size 10M;
+
+    set $pxz_vip_redirect 1;
+    if ($http_x_forwarded_proto = "https") {
+        set $pxz_vip_redirect 0;
+    }
+    if ($uri ~ "^/.well-known/acme-challenge/") {
+        set $pxz_vip_redirect 0;
+    }
+    if ($pxz_vip_redirect = 1) {
+        return 301 https://$host$request_uri;
+    }
+
+    location /.well-known/acme-challenge/ {
+        allow all;
+        default_type text/plain;
+        root /var/www/html;
+        try_files $uri =404;
+    }
+
+	# 静态文件直接服务，不经过 Next.js
+	location /uploads/ {
+		alias /opt/ass/public/uploads/;
+		expires 30d;
+		add_header Cache-Control "public, immutable";
+		try_files $uri $uri/ =404;
+	}
+
+    location /files/ {
+        alias /opt/ass/public/files/;
+        expires 30d;
+        add_header Cache-Control "public, max-age=2592000";
+    }
+
+    # 勿用 proxy_pass .../buyer/login：会把 /_next/static 拼成错误 URI，导致无样式
+    location / {
+        rewrite ^/$ /buyer/login break;
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+    }
+}
+
+# —— ass 管理域：仅卖家端入口（精确匹配，优先于 *.pingxiaozhu.com） ——
+# / → /login；/buyer* → 买家门户改去 vip（与 ass 应用路由一致：卖家 /login，买家 /buyer）
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ass.pingxiaozhu.com;
+
+    access_log /var/log/nginx/pingxiaozhu_ass_access.log;
+    error_log /var/log/nginx/pingxiaozhu_ass_error.log;
+    client_max_body_size 10M;
+
+    set $pxz_asshost_redirect 1;
+    if ($http_x_forwarded_proto = "https") {
+        set $pxz_asshost_redirect 0;
+    }
+    if ($uri ~ "^/.well-known/acme-challenge/") {
+        set $pxz_asshost_redirect 0;
+    }
+    if ($pxz_asshost_redirect = 1) {
+        return 301 https://$host$request_uri;
+    }
+
+    location /.well-known/acme-challenge/ {
+        allow all;
+        default_type text/plain;
+        root /var/www/html;
+        try_files $uri =404;
+    }
+
+    location = / {
+        return 302 /login;
+    }
+
+    location ^~ /buyer {
+        return 302 https://vip.pingxiaozhu.com$request_uri;
+    }
+
+    location = /MP_verify_sVqIlVL7Wx5orjph.txt {
+        alias /opt/ass/public/MP_verify_sVqIlVL7Wx5orjph.txt;
+        default_type text/plain;
+    }
+
+	# 静态文件直接服务，不经过 Next.js
+	location /uploads/ {
+		alias /opt/ass/public/uploads/;
+		expires 30d;
+		add_header Cache-Control "public, immutable";
+		try_files $uri $uri/ =404;
+	}
+
+    location /files/ {
+        alias /opt/ass/public/files/;
+        expires 30d;
+        add_header Cache-Control "public, max-age=2592000";
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+    }
+}
+
+# —— ass：其余子域 :80 ——
+server {
+    listen 80;
+    listen [::]:80;
+    server_name *.pingxiaozhu.com;
+
+    access_log /var/log/nginx/pingxiaozhu_ass_access.log;
+    error_log /var/log/nginx/pingxiaozhu_ass_error.log;
+    client_max_body_size 10M;
+
+    set $pxz_ass_redirect 1;
+    if ($http_x_forwarded_proto = "https") {
+        set $pxz_ass_redirect 0;
+    }
+    if ($uri ~ "^/.well-known/acme-challenge/") {
+        set $pxz_ass_redirect 0;
+    }
+    if ($pxz_ass_redirect = 1) {
+        return 301 https://$host$request_uri;
+    }
+
+    location /.well-known/acme-challenge/ {
+        allow all;
+        default_type text/plain;
+        root /var/www/html;
+        try_files $uri =404;
+    }
+
+    location = /MP_verify_sVqIlVL7Wx5orjph.txt {
+        alias /opt/ass/public/MP_verify_sVqIlVL7Wx5orjph.txt;
+        default_type text/plain;
+    }
+
+	# 静态文件直接服务，不经过 Next.js
+	location /uploads/ {
+		alias /opt/ass/public/uploads/;
+		expires 30d;
+		add_header Cache-Control "public, immutable";
+		try_files $uri $uri/ =404;
+	}
+
+    location /files/ {
+        alias /opt/ass/public/files/;
+        expires 30d;
+        add_header Cache-Control "public, max-age=2592000";
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+    }
+}
+
+# —— 买家端：vip :443 ——
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name vip.pingxiaozhu.com;
+
+    ssl_certificate /etc/letsencrypt/live/pingxiaozhu.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/pingxiaozhu.com/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+    access_log /var/log/nginx/vip_access.log;
+    error_log /var/log/nginx/vip_error.log;
+
+    client_max_body_size 10M;
+
+	# 静态文件直接服务，不经过 Next.js
+	location /uploads/ {
+		alias /opt/ass/public/uploads/;
+		expires 30d;
+		add_header Cache-Control "public, immutable";
+		try_files $uri $uri/ =404;
+	}
+
+    location /files/ {
+        alias /opt/ass/public/files/;
+        expires 30d;
+        add_header Cache-Control "public, max-age=2592000";
+    }
+
+    location / {
+        rewrite ^/$ /buyer/login break;
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+
+# —— ass.pingxiaozhu.com :443（卖家 /login；买家路径去 vip） ——
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name ass.pingxiaozhu.com;
+
+    ssl_certificate /etc/letsencrypt/live/pingxiaozhu.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/pingxiaozhu.com/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+    access_log /var/log/nginx/pingxiaozhu_ass_access.log;
+    error_log /var/log/nginx/pingxiaozhu_ass_error.log;
+
+    client_max_body_size 10M;
+
+    location = / {
+        return 302 /login;
+    }
+
+    location ^~ /buyer {
+        return 302 https://vip.pingxiaozhu.com$request_uri;
+    }
+
+    location = /MP_verify_sVqIlVL7Wx5orjph.txt {
+        alias /opt/ass/public/MP_verify_sVqIlVL7Wx5orjph.txt;
+        default_type text/plain;
+    }
+
+	# 静态文件直接服务，不经过 Next.js
+	location /uploads/ {
+		alias /opt/ass/public/uploads/;
+		expires 30d;
+		add_header Cache-Control "public, immutable";
+		try_files $uri $uri/ =404;
+	}
+
+    location /files/ {
+        alias /opt/ass/public/files/;
+        expires 30d;
+        add_header Cache-Control "public, max-age=2592000";
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+
+# —— ass 其余子域 :443 ——
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name *.pingxiaozhu.com;
+
+    ssl_certificate /etc/letsencrypt/live/pingxiaozhu.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/pingxiaozhu.com/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+    access_log /var/log/nginx/pingxiaozhu_ass_access.log;
+    error_log /var/log/nginx/pingxiaozhu_ass_error.log;
+
+    client_max_body_size 10M;
+
+    location = /MP_verify_sVqIlVL7Wx5orjph.txt {
+        alias /opt/ass/public/MP_verify_sVqIlVL7Wx5orjph.txt;
+        default_type text/plain;
+    }
+
+	# 静态文件直接服务，不经过 Next.js
+	location /uploads/ {
+		alias /opt/ass/public/uploads/;
+		expires 30d;
+		add_header Cache-Control "public, immutable";
+		try_files $uri $uri/ =404;
+	}
+
+    location /files/ {
+        alias /opt/ass/public/files/;
+        expires 30d;
+        add_header Cache-Control "public, max-age=2592000";
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}

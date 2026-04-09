@@ -1,0 +1,18 @@
+##
+# 默认站点：仅作 fallback。业务站点请用 sites-available 下独立文件并在 sites-enabled 中启用。
+# https://wiki.debian.org/Nginx/DirectoryStructure
+##
+
+server {
+	listen 80 default_server;
+	listen [::]:80 default_server;
+
+	root /var/www/html;
+	index index.html index.htm index.nginx-debian.html;
+
+	server_name _;
+
+	location / {
+		try_files $uri $uri/ =404;
+	}
+}
