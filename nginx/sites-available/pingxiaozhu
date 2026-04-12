@@ -269,6 +269,75 @@ server {
     }
 }
 
+# —— agent 代理端：专用入口（精确匹配，优先于 *.pingxiaozhu.com） ——
+# / → /agent-login（与 https://agent.pingxiaozhu.com/agent-login 一致）
+server {
+    listen 80;
+    listen [::]:80;
+    server_name agent.pingxiaozhu.com;
+
+    access_log /var/log/nginx/pingxiaozhu_agent_access.log;
+    error_log /var/log/nginx/pingxiaozhu_agent_error.log;
+    client_max_body_size 10M;
+
+    set $pxz_agent_redirect 1;
+    if ($http_x_forwarded_proto = "https") {
+        set $pxz_agent_redirect 0;
+    }
+    if ($uri ~ "^/.well-known/acme-challenge/") {
+        set $pxz_agent_redirect 0;
+    }
+    if ($pxz_agent_redirect = 1) {
+        return 301 https://$host$request_uri;
+    }
+
+    location /.well-known/acme-challenge/ {
+        allow all;
+        default_type text/plain;
+        root /var/www/html;
+        try_files $uri =404;
+    }
+
+    location = / {
+        return 302 /agent-login;
+    }
+
+    location ^~ /buyer {
+        return 302 https://vip.pingxiaozhu.com$request_uri;
+    }
+
+    location = /MP_verify_sVqIlVL7Wx5orjph.txt {
+        alias /opt/ass/public/MP_verify_sVqIlVL7Wx5orjph.txt;
+        default_type text/plain;
+    }
+
+	# 静态文件直接服务，不经过 Next.js
+	location /uploads/ {
+		alias /opt/ass/public/uploads/;
+		expires 30d;
+		add_header Cache-Control "public, immutable";
+		try_files $uri $uri/ =404;
+	}
+
+    location /files/ {
+        alias /opt/ass/public/files/;
+        expires 30d;
+        add_header Cache-Control "public, max-age=2592000";
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+    }
+}
+
 # —— ass：其余子域 :80 ——
 server {
     listen 80;
@@ -451,6 +520,62 @@ server {
 
     location ^~ /buyer {
         return 302 https://vip.pingxiaozhu.com$request_uri;
+    }
+
+	# 静态文件直接服务，不经过 Next.js
+	location /uploads/ {
+		alias /opt/ass/public/uploads/;
+		expires 30d;
+		add_header Cache-Control "public, immutable";
+		try_files $uri $uri/ =404;
+	}
+
+    location /files/ {
+        alias /opt/ass/public/files/;
+        expires 30d;
+        add_header Cache-Control "public, max-age=2592000";
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+
+# —— agent.pingxiaozhu.com :443（代理端专用入口） ——
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name agent.pingxiaozhu.com;
+
+    ssl_certificate /etc/letsencrypt/live/pingxiaozhu.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/pingxiaozhu.com/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+    access_log /var/log/nginx/pingxiaozhu_agent_access.log;
+    error_log /var/log/nginx/pingxiaozhu_agent_error.log;
+
+    client_max_body_size 10M;
+
+    location = / {
+        return 302 /agent-login;
+    }
+
+    location ^~ /buyer {
+        return 302 https://vip.pingxiaozhu.com$request_uri;
+    }
+
+    location = /MP_verify_sVqIlVL7Wx5orjph.txt {
+        alias /opt/ass/public/MP_verify_sVqIlVL7Wx5orjph.txt;
+        default_type text/plain;
     }
 
 	# 静态文件直接服务，不经过 Next.js
